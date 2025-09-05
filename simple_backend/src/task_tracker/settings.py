@@ -1,0 +1,22 @@
+from functools import lru_cache
+
+from pydantic import SecretStr, AnyUrl
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Конфигурация настроек проекта."""
+
+    JSONBIN_BASE_URL: AnyUrl = "https://api.jsonbin.io/v3/"
+    JSONBIN_MASTER_KEY: SecretStr
+    JSONBIN_BIN_ID: str
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",
+    )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

@@ -13,5 +13,5 @@ repos:
   rev: v0.9.4
   hooks:
     - id: ruff
-      args: [--fix, ./src]
+      args: [--fix]
     - id: ruff-format
