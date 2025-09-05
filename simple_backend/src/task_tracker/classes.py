@@ -17,14 +17,12 @@ class Task:
     """Класс для работы с таской."""
 
     def __init__(
-        self,
-        id: int,
-        title: str,
-        status: TaskStatus,
+        self, id: int, title: str, status: TaskStatus, notes: str | None = None
     ) -> None:
         self.id = id
         self.title = title.strip()
         self.status = status
+        self.notes = notes
 
     def rename_title(self, new_title: str) -> None:
         if not new_title.strip() or len(new_title.strip()) > 50:
@@ -117,7 +115,10 @@ class FileTaskStore:
         return new_task
 
     def update_task(
-        self, id: int, title: str | None = None, status: TaskStatus | None = None
+        self,
+        id: int,
+        title: str | None = None,
+        status: TaskStatus | None = None,
     ) -> Task:
         tasks = self.get_all()
         task = None
@@ -163,7 +164,7 @@ class RemoteTaskStore:
 
     def _headers_for_write(self):
         return {
-            "X-Master-key": self._master_key,
+            "X-Master-Key": self._master_key,
             "Content-Type": "application/json",
         }
 
@@ -205,8 +206,9 @@ class RemoteTaskStore:
         for item in tasks_raw:
             tid = int(item["id"])
             title = item["title"]
-            status = item["status"]
-            task = Task(tid, title, status)
+            status = TaskStatus(item["status"])
+            notes = item.get("notes")
+            task = Task(tid, title, status, notes)
             result.append(task)
         return result
 
@@ -233,6 +235,7 @@ class RemoteTaskStore:
         id: int,
         title: str | None = None,
         status: TaskStatus | None = None,
+        notes: str | None = None,
     ):
         payload = self.fetch_payload()
         tasks_raw = payload["tasks"]
@@ -247,15 +250,17 @@ class RemoteTaskStore:
             id=int(task["id"]),
             title=task["title"],
             status=TaskStatus(task["status"]),
+            notes=task.get("notes"),
         )
         if title is not None:
             obj.rename_title(title)
         if status is not None:
             obj.change_status(status)
-        if title is None and status is None:
-            raise ValueError("Ошибка! Нечего обновлять!")
+        if notes is not None:
+            obj.notes = notes
         task["title"] = obj.title
         task["status"] = obj.status.value
+        task["notes"] = obj.notes
         self.push_payload(payload)
         return obj
 
@@ -270,6 +275,59 @@ class RemoteTaskStore:
             raise ValueError("ID не найден!")
         self.push_payload(payload)
         return
+
+
+class TaskService:
+    """Класс для работы с LLM."""
+
+    def __init__(
+        self,
+        store: RemoteTaskStore,
+        settings: Settings | None = None,
+    ):
+        self.settings = settings or get_settings()
+        self.store = store
+        self._api_token = self.settings.API_TOKEN
+        self._account_id = self.settings.ACCOUNT_ID
+        self._cf_link = str(self.settings.CF_LINK)
+
+    def _cf_headers(self):
+        return {
+            "Authorization": f"Bearer {self._api_token}",
+            "Content-Type": "application/json",
+        }
+
+    def _build_prompt(self, title: str):
+        return f'Ты — сеньор-наставник по продуктивности. Задача: "{title}".'
+
+    def _cf_generate_plan(self, title: str):
+        endpoint = self._cf_link
+        headers = self._cf_headers()
+        prompt = self._build_prompt(title)
+        body = {"prompt": prompt}
+        try:
+            resp = requests.post(
+                url=endpoint,
+                headers=headers,
+                json=body,
+                timeout=10,
+            )
+        except requests.RequestException as e:
+            raise RuntimeError(f"Попытка подключения провалилась: {e}")
+        data = resp.json()
+        new_data = data["result"]["response"]
+        return new_data.strip()
+
+    def create_task_and_enrich(self, title: str, status: TaskStatus):
+        task = self.store.create_task(title, status)
+        try:
+            plan = self._cf_generate_plan(title)
+            if plan:
+                self.store.update_task(id=task.id, notes=plan)
+                task.notes = plan
+        except Exception as e:
+            print(f"Попытка подключения провалилась: {e}")
+        return task
 
 
 # f1 = FileTaskStore('data/tasks.json')
@@ -291,3 +349,7 @@ class RemoteTaskStore:
 # s1.create_task(title='Leetcode', status=TaskStatus.IN_PROGRESS)
 # s1.update_task(2, status=TaskStatus.DONE)
 # s1.delete_task(2)
+# s1.get_all()
+# s2 = TaskService(RemoteTaskStore)
+# print(s2._cf_generate_plan('Что это такое?*!'))
+# print(s2._cf_headers())

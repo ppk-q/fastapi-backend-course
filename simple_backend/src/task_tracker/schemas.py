@@ -17,3 +17,4 @@ class TaskCreate(BaseModel):
 class TaskUpdate(BaseModel):
     title: str | None = Field(None, description="Новое название")
     status: TaskStatus | None
+    notes: str | None

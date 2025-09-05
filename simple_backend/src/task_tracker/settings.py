@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     JSONBIN_BASE_URL: AnyUrl = "https://api.jsonbin.io/v3/"
     JSONBIN_MASTER_KEY: SecretStr
     JSONBIN_BIN_ID: str
+    API_TOKEN: str
+    ACCOUNT_ID: str
+    CF_LINK: AnyUrl = "https://api.cloudflare.com/client/v4/"
 
     model_config = SettingsConfigDict(
         env_file=".env",
