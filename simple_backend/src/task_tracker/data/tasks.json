@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "tasks": [
+    {
+      "id": 3,
+      "title": "Codewars",
+      "status": "in_progress"
+    },
+    {
+      "id": 4,
+      "title": "Повторить материал по основам Python",
+      "status": "todo"
+    }
+  ]
+}
