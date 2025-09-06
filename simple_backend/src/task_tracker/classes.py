@@ -1,9 +1,11 @@
+import json
 import os
+from abc import ABC, abstractmethod
 from enum import StrEnum
 from pathlib import Path
-import json
-import requests
+from typing import Any
 
+import requests
 from settings import Settings, get_settings
 
 
@@ -13,11 +15,135 @@ class TaskStatus(StrEnum):
     DONE = "done"
 
 
+class BaseHTTPClient(ABC):
+    """Базовый класс для работы с клиентами."""
+
+    def __init__(self, base_url: str, timeout: float = 10.0):
+        self.base_url = base_url.rstrip("/")
+        self.timeout = float(timeout)
+
+    @abstractmethod
+    def auth_headers(self) -> dict[str, str]:
+        pass
+
+    def _url(self, path: str = "") -> str:
+        if not path:
+            return self.base_url
+        if path.startswith("http://") or path.startswith("https://"):
+            return path
+        return f"{self.base_url}/{path.lstrip('/')}"
+
+    def request(
+        self,
+        method: str,
+        path: str = "",
+        *,
+        headers=None,
+        params=None,
+        json=None,
+    ):
+        url = self._url(path)
+        merged_headers = {**self.auth_headers(), **(headers or {})}
+        try:
+            resp = requests.request(
+                method=method.upper(),
+                url=url,
+                headers=merged_headers,
+                params=params,
+                json=json,
+                timeout=self.timeout,
+            )
+        except requests.RequestException as e:
+            raise RuntimeError(f"HTTP запрос не удался: {e}") from e
+        return resp
+
+    def json(
+        self,
+        resp: requests.Response,
+        expected: tuple[int, ...] = (200,),
+    ) -> Any:
+        status = resp.status_code
+        if status not in expected:
+            snippet = (resp.text or "")[:200]
+            ct = resp.headers.get("Content-Type", "")
+            raise RuntimeError(
+                f"Неожиданный статус {status} (expected {expected}); "
+                f"content-type={ct}; body={snippet}"
+            )
+        try:
+            return resp.json()
+        except ValueError as e:
+            snippet = (resp.text or "")[:200]
+            raise RuntimeError(f"Не удалось спарсить JSON: {e}") from e
+
+
+class JsonBinClient(BaseHTTPClient):
+    """Класс для работы с JSON."""
+
+    def __init__(
+        self,
+        base_url: str,
+        bin_id: str,
+        master_key: str,
+        timeout: float = 10.0,
+    ):
+        super().__init__(base_url=base_url, timeout=timeout)
+        self.bin_id = bin_id
+        self._master_key = master_key
+
+    def auth_headers(self) -> dict[str, str]:
+        return {
+            "X-Master-Key": self._master_key,
+            "Content-Type": "application/json",
+        }
+
+    def fetch_payload(self) -> dict[str, Any]:
+        path = f"b/{self.bin_id}/latest"
+        extra = {"X-Bin-Meta": "false"}
+        resp = self.request("GET", path=path, headers=extra)
+        data = self.json(resp, expected=(200,))
+        tasks = data.get("tasks", [])
+        if not isinstance(tasks, list):
+            raise RuntimeError("Неправильный тип данных!")
+        return data
+
+    def push_payload(self, payload: dict[str, Any]) -> None:
+        path = f"b/{self.bin_id}"
+        resp = self.request("PUT", path=path, json=payload)
+        self.json(resp, expected=(200, 201))
+        return None
+
+
+class CloudflareAIClient(BaseHTTPClient):
+    """Класс для работы с LLM."""
+
+    def __init__(self, base_url: str, api_token: str, timeout: float = 10):
+        super().__init__(base_url=base_url, timeout=timeout)
+        self._api_token = api_token
+
+    def auth_headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self._api_token}",
+            "Content-Type": "application/json",
+        }
+
+    def generate_plan(self, prompt: str) -> str:
+        resp = self.request("POST", path="", json={"prompt": prompt})
+        data = self.json(resp, expected=(200,))
+        result = data.get("result", {})
+        if isinstance(result, dict) and "response" in result:
+            return str(result["response"]).strip()
+
+
 class Task:
     """Класс для работы с таской."""
 
     def __init__(
-        self, id: int, title: str, status: TaskStatus, notes: str | None = None
+        self,
+        id: int,
+        title: str,
+        status: TaskStatus,
+        notes: str | None = None,
     ) -> None:
         self.id = id
         self.title = title.strip()
@@ -55,7 +181,12 @@ class TaskStore:
         self.tasks[new_id] = task
         return task
 
-    def update_task(self, id: int, title: str | None, status: TaskStatus | None):
+    def update_task(
+        self,
+        id: int,
+        title: str | None,
+        status: TaskStatus | None,
+    ):
         if id not in self.tasks:
             raise ValueError("ID не найден!")
         task = self.tasks[id]
@@ -78,7 +209,7 @@ class FileTaskStore:
         self.path = Path(path)
 
     def get_all(self) -> list[Task]:
-        with open(self.path, "r", encoding="utf-8") as f:
+        with open(self.path, encoding="utf-8") as f:
             data = json.load(f)
         tasks = data.get("tasks", [])
         result = []
@@ -93,7 +224,8 @@ class FileTaskStore:
 
     def dump_all(self, tasks: list[Task]) -> None:
         items = [
-            {"id": t.id, "title": t.title, "status": t.status.value} for t in tasks
+            {"id": t.id, "title": t.title, "status": t.status.value}
+            for t in tasks
         ]
         payload = {"schema_version": 1, "tasks": items}
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -105,10 +237,7 @@ class FileTaskStore:
 
     def create_task(self, title, status):
         tasks = self.get_all()
-        if len(tasks) == 0:
-            new_id = 1
-        else:
-            new_id = max(t.id for t in tasks) + 1
+        new_id = 1 if not tasks else max(t.id for t in tasks) + 1
         new_task = Task(new_id, title, status)
         tasks.append(new_task)
         self.dump_all(tasks)
@@ -147,60 +276,11 @@ class FileTaskStore:
 class RemoteTaskStore:
     """Класс для работы с внешним хранилищем."""
 
-    def __init__(self, settings: Settings | None = None):
-        self.settings = settings or get_settings()
-        self.base_url = str(self.settings.JSONBIN_BASE_URL)
-        self.bin_id = self.settings.JSONBIN_BIN_ID
-        self._master_key = self.settings.JSONBIN_MASTER_KEY.get_secret_value()
-
-    def endpoint_latest(self):
-        return self.base_url + self.bin_id + "/latest"
-
-    def endpoint_bin(self):
-        return self.base_url + self.bin_id
-
-    def _headers_for_read(self):
-        return {"X-Master-key": self._master_key, "X-Bin-Meta": "false"}
-
-    def _headers_for_write(self):
-        return {
-            "X-Master-Key": self._master_key,
-            "Content-Type": "application/json",
-        }
-
-    def fetch_payload(self):
-        endpoint = self.endpoint_latest()
-        headers = self._headers_for_read()
-        try:
-            resp = requests.get(
-                endpoint,
-                headers=headers,
-                timeout=10,
-            )
-        except requests.RequestException as e:
-            raise RuntimeError(f"Ошибка чтения jsonbin: {e}")
-        payload = resp.json()
-        tasks = payload.get("tasks", [])
-        if not isinstance(tasks, list):
-            raise RuntimeError("Таски должны быть списком!")
-        return payload
-
-    def push_payload(self, payload):
-        endpoint = self.endpoint_bin()
-        headers = self._headers_for_write()
-        try:
-            resp = requests.put(
-                endpoint,
-                headers=headers,
-                json=payload,
-                timeout=10,
-            )
-        except requests.RequestException as e:
-            raise RuntimeError(f"Ошибка записи jsonbin: {e}")
-        return resp.status_code
+    def __init__(self, jsonbin: JsonBinClient):
+        self.jsonbin = jsonbin
 
     def get_all(self) -> list[Task]:
-        payload = self.fetch_payload()
+        payload = self.jsonbin.fetch_payload()
         tasks_raw = payload.get("tasks", [])
         result = []
         for item in tasks_raw:
@@ -213,7 +293,7 @@ class RemoteTaskStore:
         return result
 
     def create_task(self, title: str, status: TaskStatus):
-        payload = self.fetch_payload()
+        payload = self.jsonbin.fetch_payload()
         tasks_raw = payload["tasks"]
         if len(tasks_raw) == 0:
             new_id = 1
@@ -227,7 +307,7 @@ class RemoteTaskStore:
                 "status": task.status.value,
             }
         )
-        self.push_payload(payload)
+        self.jsonbin.push_payload(payload)
         return task
 
     def update_task(
@@ -237,7 +317,7 @@ class RemoteTaskStore:
         status: TaskStatus | None = None,
         notes: str | None = None,
     ):
-        payload = self.fetch_payload()
+        payload = self.jsonbin.fetch_payload()
         tasks_raw = payload["tasks"]
         task = None
         for t in tasks_raw:
@@ -258,14 +338,14 @@ class RemoteTaskStore:
             obj.change_status(status)
         if notes is not None:
             obj.notes = notes
+            task["notes"] = obj.notes
         task["title"] = obj.title
         task["status"] = obj.status.value
-        task["notes"] = obj.notes
-        self.push_payload(payload)
+        self.jsonbin.push_payload(payload)
         return obj
 
     def delete_task(self, id: int):
-        payload = self.fetch_payload()
+        payload = self.jsonbin.fetch_payload()
         tasks_raw = payload["tasks"]
         for index, task in enumerate(tasks_raw):
             if int(task["id"]) == id:
@@ -273,8 +353,8 @@ class RemoteTaskStore:
                 break
         else:
             raise ValueError("ID не найден!")
-        self.push_payload(payload)
-        return
+        self.jsonbin.push_payload(payload)
+        return None
 
 
 class TaskService:
@@ -283,45 +363,20 @@ class TaskService:
     def __init__(
         self,
         store: RemoteTaskStore,
+        ai: CloudflareAIClient,
         settings: Settings | None = None,
     ):
         self.settings = settings or get_settings()
         self.store = store
-        self._api_token = self.settings.API_TOKEN
-        self._account_id = self.settings.ACCOUNT_ID
-        self._cf_link = str(self.settings.CF_LINK)
-
-    def _cf_headers(self):
-        return {
-            "Authorization": f"Bearer {self._api_token}",
-            "Content-Type": "application/json",
-        }
+        self.ai = ai
 
     def _build_prompt(self, title: str):
-        return f'Ты — сеньор-наставник по продуктивности. Задача: "{title}".'
-
-    def _cf_generate_plan(self, title: str):
-        endpoint = self._cf_link
-        headers = self._cf_headers()
-        prompt = self._build_prompt(title)
-        body = {"prompt": prompt}
-        try:
-            resp = requests.post(
-                url=endpoint,
-                headers=headers,
-                json=body,
-                timeout=10,
-            )
-        except requests.RequestException as e:
-            raise RuntimeError(f"Попытка подключения провалилась: {e}")
-        data = resp.json()
-        new_data = data["result"]["response"]
-        return new_data.strip()
+        return f"Ты — сеньор-наставник по продуктивности. Задача: '{title}'."
 
     def create_task_and_enrich(self, title: str, status: TaskStatus):
         task = self.store.create_task(title, status)
         try:
-            plan = self._cf_generate_plan(title)
+            plan = self.ai.generate_plan(self._build_prompt(title))
             if plan:
                 self.store.update_task(id=task.id, notes=plan)
                 task.notes = plan

@@ -1,15 +1,32 @@
+from classes import (
+    CloudflareAIClient,
+    JsonBinClient,
+    RemoteTaskStore,
+    Task,
+    TaskService,
+)
 from fastapi import FastAPI
-
-from classes import Task, RemoteTaskStore, TaskService
-from schemas import TaskScheme, TaskCreate, TaskUpdate
+from schemas import TaskCreate, TaskScheme, TaskUpdate
 from settings import get_settings
 
 app = FastAPI()
 
 # tracker = FileTaskStore('data/tasks.json')
+
 settings = get_settings()
-store = RemoteTaskStore(settings)
-service = TaskService(store, settings)
+cf = CloudflareAIClient(
+    base_url=str(settings.CF_LINK),
+    api_token=settings.API_TOKEN,
+    timeout=10.0,
+)
+jb = JsonBinClient(
+    base_url=str(settings.JSONBIN_BASE_URL),
+    bin_id=settings.JSONBIN_BIN_ID,
+    master_key=settings.JSONBIN_MASTER_KEY.get_secret_value(),
+    timeout=10.0,
+)
+store = RemoteTaskStore(jsonbin=jb)
+service = TaskService(store, ai=cf, settings=settings)
 tracker = store
 
 
