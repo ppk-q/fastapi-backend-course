@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import SecretStr, AnyUrl
+from pydantic import AnyUrl, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 

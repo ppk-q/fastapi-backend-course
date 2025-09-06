@@ -1,6 +1,5 @@
-from pydantic import BaseModel, Field
-
 from classes import TaskStatus
+from pydantic import BaseModel, Field
 
 
 class TaskScheme(BaseModel):
