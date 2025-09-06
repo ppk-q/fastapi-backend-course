@@ -22,3 +22,19 @@ build-backend = "poetry.core.masonry.api"
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.12.11"
 pre-commit = "^4.3.0"
+
+[tool.ruff]
+line-length = 79
+target-version = "py312"
+src = ["simple_backend/src/task_tracker"]
+extend-exclude = ["migrations", ".venv", "dist", "build"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E203"]
+per-file-ignores = { "__init__.py" = ["F401"], "tests/**" = ["S101"] }
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = false
